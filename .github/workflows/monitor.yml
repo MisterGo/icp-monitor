@@ -3,7 +3,7 @@ name: ICP Monitor
 on:
   # Run every 15 minutes
   schedule:
-    - cron: "*/15 * * * *"
+    - cron: "*/30 * * * *"
   # Allow manual trigger from GitHub UI
   workflow_dispatch:
 
