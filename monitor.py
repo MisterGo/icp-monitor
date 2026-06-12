@@ -12,6 +12,7 @@ import logging
 from datetime import datetime
 from pathlib import Path
 from playwright.async_api import async_playwright
+from playwright_stealth import stealth_async
 
 # ── Logging ──────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -86,8 +87,10 @@ async def scrape_lot(page, target: dict) -> str | None:
         log.info(f"Checking: {target['province_name']} / {target['office_name']} / {target['tramite']}")
 
         # Step 1: Load main page
-        await page.goto(ICP_URL, wait_until="domcontentloaded", timeout=30000)
-        await page.wait_for_selector("select#form", timeout=15000)
+        # F5/BIG-IP bot protection requires extra time for JS challenge to resolve
+        await page.goto(ICP_URL, wait_until="networkidle", timeout=60000)
+        # Wait up to 30s for the province select to appear after JS challenge
+        await page.wait_for_selector("select#form", timeout=30000)
 
         # Step 2: Select province by matching p=CODE in the option value URL
         province_code = target["province"]
@@ -308,19 +311,37 @@ async def main():
     async with async_playwright() as p:
         browser = await p.chromium.launch(
             headless=True,
-            args=["--no-sandbox", "--disable-setuid-sandbox",
-                  "--disable-dev-shm-usage", "--disable-gpu"]
+            args=[
+                "--no-sandbox", "--disable-setuid-sandbox",
+                "--disable-dev-shm-usage", "--disable-gpu",
+                "--disable-blink-features=AutomationControlled",
+                "--disable-web-security",
+                "--no-first-run", "--no-default-browser-check",
+            ]
         )
         context = await browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                       "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+                       "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
             locale="es-ES",
-            viewport={"width": 1280, "height": 800}
+            viewport={"width": 1280, "height": 800},
+            # Hide automation fingerprint
+            extra_http_headers={
+                "Accept-Language": "es-ES,es;q=0.9",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+            }
         )
+        # Mask navigator.webdriver = true
+        await context.add_init_script("""
+            Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+            Object.defineProperty(navigator, 'languages', { get: () => ['es-ES', 'es'] });
+            Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3] });
+        """)
+        # Will apply stealth per-page below
 
         for target in watchlist:
             key = state_key(target)
             page = await context.new_page()
+            await stealth_async(page)
             
             try:
                 new_text = await scrape_lot(page, target)
