@@ -127,7 +127,7 @@ def scrape_lot(target: dict) -> str | None:
     office_name   = target["office_name"]
     tramite_kw    = target["tramite"].upper()
 
-    with Session(impersonate="chrome124") as s:
+    with Session(impersonate="chrome124", verify=False) as s:
         s.headers.update(HEADERS)
 
         # ── Step 1: Load main page ────────────────────────────────────────────
