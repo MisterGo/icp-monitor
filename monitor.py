@@ -118,10 +118,10 @@ async def scrape_lot(page, target: dict) -> str | None:
 
         log.info(f"  Office: {office_value}")
         await page.select_option("select#sede", value=office_value)
-        await page.wait_for_timeout(500)
 
-        # ── Step 5: Select tramite from select#tramiteGrupo[0] ────────────────
-        # Tramite select appears on same page after office selection (no page reload)
+        # ── Step 5: Wait for tramite select to appear dynamically ─────────────
+        # After office selection the tramite dropdown appears via JS — wait for it
+        await page.wait_for_selector("select[id^='tramiteGrupo']", timeout=15000)
         tramite_sel = await page.query_selector("select[id^='tramiteGrupo']")
         if not tramite_sel:
             log.error("  Tramite select not found")
@@ -147,11 +147,12 @@ async def scrape_lot(page, target: dict) -> str | None:
         log.info(f"  Tramite: {tramite_label} (value={tramite_value})")
         tramite_sel_id = await tramite_sel.get_attribute("id")
         await page.select_option(f"#{tramite_sel_id}", value=tramite_value)
-        await page.wait_for_timeout(500)
+        await page.wait_for_timeout(800)
 
         # ── Step 6: Click Aceptar → result page ──────────────────────────────
-        await page.click("#btnAceptar")
-        await page.wait_for_load_state("networkidle", timeout=30000)
+        # Use wait_for_navigation to safely handle the page transition
+        async with page.expect_navigation(wait_until="networkidle", timeout=30000):
+            await page.click("#btnAceptar")
         await page.wait_for_timeout(1000)
 
         # ── Step 7: Extract result ────────────────────────────────────────────
