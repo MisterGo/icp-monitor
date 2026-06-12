@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-ICP Appointment Monitor
-Uses curl-cffi to impersonate Chrome TLS fingerprint, bypassing FortiGate IPS.
+ICP Appointment Monitor — uses system Chrome via Playwright.
+System Chrome bypasses FortiGate/F5 bot detection that blocks Chromium.
 """
 
 import os
@@ -11,9 +11,7 @@ import asyncio
 import logging
 from datetime import datetime
 from pathlib import Path
-from urllib.parse import urljoin, urlparse, parse_qs, urlencode, urlunparse
-from curl_cffi.requests import Session
-from bs4 import BeautifulSoup
+from playwright.async_api import async_playwright
 
 logging.basicConfig(
     level=logging.INFO,
@@ -21,25 +19,12 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-TELEGRAM_TOKEN  = os.environ["TELEGRAM_TOKEN"]
+TELEGRAM_TOKEN   = os.environ["TELEGRAM_TOKEN"]
 TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
-WATCHLIST_JSON  = os.environ.get("WATCHLIST_JSON", "[]")
-STATE_FILE      = Path(os.environ.get("STATE_FILE", "data/state.json"))
+WATCHLIST_JSON   = os.environ.get("WATCHLIST_JSON", "[]")
+STATE_FILE       = Path(os.environ.get("STATE_FILE", "data/state.json"))
 
-BASE_URL = "https://icp.administracionelectronica.gob.es"
-START_URL = f"{BASE_URL}/icpplus/index.html"
-
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                  "AppleWebKit/537.36 (KHTML, like Gecko) "
-                  "Chrome/124.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,"
-              "image/avif,image/webp,*/*;q=0.8",
-    "Accept-Language": "es-ES,es;q=0.9",
-    "Accept-Encoding": "gzip, deflate, br",
-    "Connection": "keep-alive",
-    "Upgrade-Insecure-Requests": "1",
-}
+START_URL = "https://icp.administracionelectronica.gob.es/icpplus/index.html"
 
 # ── State ─────────────────────────────────────────────────────────────────────
 def load_state() -> dict:
@@ -56,7 +41,7 @@ def save_state(state: dict):
     STATE_FILE.write_text(json.dumps(state, ensure_ascii=False, indent=2))
 
 def state_key(t: dict) -> str:
-    return f"{t['province']}_{t.get('office','')}_{t['tramite']}"
+    return f"{t['province']}_{t.get('office', '')}_{t['tramite']}"
 
 # ── Telegram ──────────────────────────────────────────────────────────────────
 def send_telegram(message: str):
@@ -79,207 +64,151 @@ def send_telegram(message: str):
     except Exception as e:
         log.error(f"Telegram send failed: {e}")
 
-# ── HTML helpers ──────────────────────────────────────────────────────────────
-def get_hidden_fields(soup) -> dict:
-    """Extract all hidden input fields from a form."""
-    return {
-        inp["name"]: inp.get("value", "")
-        for inp in soup.find_all("input", type="hidden")
-        if inp.get("name")
-    }
-
-def find_form_action(soup, base_url: str) -> str:
-    form = soup.find("form")
-    if form and form.get("action"):
-        return urljoin(base_url, form["action"])
-    return base_url
-
-def extract_result_text(soup) -> str:
-    """Extract lot number / availability status from result page."""
-    # Try known result containers
-    for sel in ["#citaNoDisponible", ".mf-msg__info", ".mf-msg__exito",
-                ".mf-msg__error", "#mensajeInfo", "#msgError",
-                "#inicio", "div.mf-msg"]:
-        el = soup.select_one(sel)
-        if el:
-            t = el.get_text(" ", strip=True)
-            if t and len(t) > 5:
-                return t
-
-    # Fallback: scan for keywords
-    body = soup.get_text(" ", strip=True)
-    keywords = ["lote", "expediente", "cita", "disponible", "número", "no hay",
-                "appointment", "turno"]
-    sentences = re.split(r'[.\n]', body)
-    relevant = [s.strip() for s in sentences
-                if any(k in s.lower() for k in keywords) and s.strip()]
-    if relevant:
-        return " | ".join(relevant[:3])
-
-    # Last resort: first meaningful chunk
-    chunks = [c.strip() for c in body.split() if len(c.strip()) > 3]
-    return " ".join(chunks[:20]) if chunks else "No text found"
-
 # ── Scraper ───────────────────────────────────────────────────────────────────
-def scrape_lot(target: dict) -> str | None:
+async def scrape_lot(page, target: dict) -> str | None:
     province_code = str(target["province"])
     province_name = target["province_name"]
     office_name   = target["office_name"]
     tramite_kw    = target["tramite"].upper()
 
-    with Session(impersonate="chrome124", verify=False) as s:
-        s.headers.update(HEADERS)
-
+    try:
         # ── Step 1: Load main page ────────────────────────────────────────────
-        log.info(f"  GET {START_URL}")
-        r = s.get(START_URL, timeout=20)
-        if r.status_code != 200:
-            log.error(f"  Main page returned {r.status_code}")
-            log.error(f"  Body: {r.text[:300]}")
-            return None
+        log.info(f"  Loading {START_URL}")
+        await page.goto(START_URL, wait_until="networkidle", timeout=60000)
+        await page.wait_for_selector("select#form", timeout=30000)
 
-        soup = BeautifulSoup(r.text, "html.parser")
-        hidden = get_hidden_fields(soup)
-
-        # Find province option value (URL like /icpplus/citar?p=33&locale=es)
-        sel = soup.find("select", id="form")
-        if not sel:
-            log.error("  select#form not found on main page")
-            log.error(f"  Page body: {soup.get_text()[:300]}")
-            return None
-
+        # ── Step 2: Select province ───────────────────────────────────────────
+        options = await page.query_selector_all("select#form option")
         province_value = None
-        for opt in sel.find_all("option"):
-            val  = opt.get("value", "")
-            text = opt.get_text(strip=True)
-            if f"p={province_code}&" in val or f"p={province_code}" == val.split("?")[-1].split("&")[0][2:]:
+        for opt in options:
+            val  = await opt.get_attribute("value") or ""
+            text = (await opt.inner_text()).strip()
+            if f"p={province_code}&" in val or f"p={province_code}" in val:
                 province_value = val; break
             if province_name.lower() in text.lower():
                 province_value = val; break
 
         if not province_value:
-            opts = [(o.get("value",""), o.get_text(strip=True)) for o in sel.find_all("option")]
-            log.error(f"  Province '{province_name}' not found. Options: {opts}")
+            opts_dbg = [(await o.get_attribute("value"), (await o.inner_text()).strip()) for o in options]
+            log.error(f"  Province not found. Options: {opts_dbg}")
             return None
 
-        log.info(f"  Province value: {province_value}")
+        log.info(f"  Province: {province_value}")
+        await page.select_option("select#form", value=province_value)
+        await page.wait_for_timeout(300)
 
-        # ── Step 2: Navigate to province URL (it's a full path, not POST) ────
-        province_url = urljoin(BASE_URL, province_value)
-        log.info(f"  GET {province_url}")
-        r = s.get(province_url, timeout=20)
-        if r.status_code != 200:
-            log.error(f"  Province page {r.status_code}: {r.text[:200]}")
-            return None
+        # ── Step 3: Click Aceptar ─────────────────────────────────────────────
+        await page.click("#btnAceptar")
+        await page.wait_for_load_state("networkidle", timeout=30000)
+        await page.wait_for_selector("select#sede", timeout=20000)
 
-        soup = BeautifulSoup(r.text, "html.parser")
-        hidden = get_hidden_fields(soup)
-        action = find_form_action(soup, province_url)
-
-        # ── Step 3: Select office ─────────────────────────────────────────────
-        sede_sel = soup.find("select", id="sede")
-        if not sede_sel:
-            log.error("  select#sede not found")
-            log.error(f"  Page: {soup.get_text()[:400]}")
-            return None
-
+        # ── Step 4: Select office ─────────────────────────────────────────────
+        sede_opts = await page.query_selector_all("select#sede option")
         office_value = None
-        for opt in sede_sel.find_all("option"):
-            val  = opt.get("value", "")
-            text = opt.get_text(strip=True)
+        for opt in sede_opts:
+            val  = await opt.get_attribute("value") or ""
+            text = (await opt.inner_text()).strip()
             if office_name.lower() in text.lower():
                 office_value = val; break
 
         if not office_value:
-            opts = [(o.get("value",""), o.get_text(strip=True)) for o in sede_sel.find_all("option")]
-            log.error(f"  Office '{office_name}' not found. Options: {opts}")
+            opts_dbg = [(await o.get_attribute("value"), (await o.inner_text()).strip()) for o in sede_opts]
+            log.error(f"  Office '{office_name}' not found. Available: {opts_dbg}")
             return None
 
-        log.info(f"  Office value: {office_value}")
+        log.info(f"  Office: {office_value}")
+        await page.select_option("select#sede", value=office_value)
+        await page.wait_for_timeout(300)
 
-        # POST office selection
-        post_data = {**hidden, "sede": office_value}
-        log.info(f"  POST {action} sede={office_value}")
-        r = s.post(action, data=post_data, timeout=20)
-        if r.status_code != 200:
-            log.error(f"  Office POST {r.status_code}: {r.text[:200]}")
-            return None
+        # ── Step 5: Click Aceptar ─────────────────────────────────────────────
+        await page.click("#btnAceptar")
+        await page.wait_for_load_state("networkidle", timeout=30000)
+        await page.wait_for_timeout(1000)
 
-        soup = BeautifulSoup(r.text, "html.parser")
-        hidden = get_hidden_fields(soup)
-        action = find_form_action(soup, r.url)
-
-        # ── Step 4: Select tramite ────────────────────────────────────────────
-        tramite_value = None
-        tramite_label = None
-
-        # Try radio buttons
-        for radio in soup.find_all("input", type="radio"):
-            rid = radio.get("id", "")
-            label = soup.find("label", attrs={"for": rid})
-            label_text = label.get_text(strip=True).upper() if label else ""
-            val = (radio.get("value") or "").upper()
+        # ── Step 6: Select tramite ────────────────────────────────────────────
+        radios = await page.query_selector_all("input[type=radio]")
+        tramite_found = False
+        for radio in radios:
+            rid   = await radio.get_attribute("id") or ""
+            label = await page.query_selector(f"label[for='{rid}']")
+            label_text = (await label.inner_text()).upper() if label else ""
+            val   = (await radio.get_attribute("value") or "").upper()
             if tramite_kw in label_text or tramite_kw in val:
-                tramite_value = radio.get("value")
-                tramite_label = label_text or val
-                tramite_name  = radio.get("name", "tramite")
+                await radio.click()
+                log.info(f"  Tramite: {label_text or val}")
+                tramite_found = True
                 break
 
-        if not tramite_value:
-            log.error(f"  Tramite '{tramite_kw}' not found")
-            radios_debug = []
-            for r2 in soup.find_all("input", type="radio"):
-                lbl = soup.find("label", attrs={"for": r2.get("id","")})
-                radios_debug.append(lbl.get_text(strip=True) if lbl else r2.get("value",""))
-            log.error(f"  Available tramites: {radios_debug}")
+        if not tramite_found:
+            radios_dbg = []
+            for r in radios:
+                rid = await r.get_attribute("id") or ""
+                lbl = await page.query_selector(f"label[for='{rid}']")
+                radios_dbg.append((await lbl.inner_text()).strip() if lbl else await r.get_attribute("value"))
+            log.error(f"  Tramite '{tramite_kw}' not found. Available: {radios_dbg}")
             return None
 
-        log.info(f"  Tramite: {tramite_label}")
+        await page.wait_for_timeout(300)
+        await page.click("#btnAceptar")
+        await page.wait_for_load_state("networkidle", timeout=30000)
+        await page.wait_for_timeout(1000)
 
-        post_data = {**hidden, tramite_name: tramite_value}
-        log.info(f"  POST {action} tramite={tramite_value}")
-        r = s.post(action, data=post_data, timeout=20)
-        if r.status_code != 200:
-            log.error(f"  Tramite POST {r.status_code}: {r.text[:200]}")
-            return None
-
-        soup = BeautifulSoup(r.text, "html.parser")
-
-        # ── Step 5: Extract result ────────────────────────────────────────────
-        result = extract_result_text(soup)
+        # ── Step 7: Extract result ────────────────────────────────────────────
+        result = await extract_result(page)
         log.info(f"  Result: {result}")
         return result
 
+    except Exception as e:
+        log.error(f"  Scraping error: {e}")
+        return None
+
+
+async def extract_result(page) -> str:
+    for sel in ["#citaNoDisponible", ".mf-msg__info", ".mf-msg__exito",
+                ".mf-msg__error", "#mensajeInfo", "#msgError", "#inicio"]:
+        el = await page.query_selector(sel)
+        if el:
+            text = (await el.inner_text()).strip()
+            if text and len(text) > 5:
+                return text
+
+    body = await page.inner_text("body")
+    keywords = ["lote", "expediente", "cita", "disponible", "no hay", "turno"]
+    lines = [l.strip() for l in body.split("\n")
+             if any(k in l.lower() for k in keywords) and l.strip()]
+    if lines:
+        return " | ".join(lines[:3])
+
+    chunks = body.split()
+    return " ".join(chunks[:20]) if chunks else "No text"
+
 # ── Notification ──────────────────────────────────────────────────────────────
 def build_notification(target: dict, old_text: str | None, new_text: str) -> str:
-    now = datetime.now().strftime("%d.%m.%Y %H:%M")
+    now      = datetime.now().strftime("%d.%m.%Y %H:%M")
     expected = target.get("expected_lot", "").strip()
-
     highlight = ""
     if expected:
-        nums = re.findall(r'\d+', new_text)
-        for n in nums:
-            if int(n) >= int(expected) if expected.isdigit() else False:
-                highlight = f"⚡️ <b>Лот {n} ≥ ожидаемого ({expected})!</b>\n"
-                break
         if expected.lower() in new_text.lower():
             highlight = "🎯 <b>ВАШ ЛОТ НАЙДЕН!</b>\n"
-
-    change_line = f"📌 <i>Было:</i> {old_text}\n" if old_text else ""
-
+        else:
+            for n in re.findall(r'\d+', new_text):
+                if expected.isdigit() and int(n) >= int(expected):
+                    highlight = f"⚡️ <b>Лот {n} ≥ ожидаемого ({expected})!</b>\n"
+                    break
+    change = f"📌 <i>Было:</i> {old_text}\n" if old_text else ""
     return (
         f"{highlight}"
         f"🔔 <b>Изменение на ICP!</b>\n"
         f"📍 {target['province_name']} → {target['office_name']}\n"
         f"📋 {target['tramite']}\n\n"
-        f"{change_line}"
+        f"{change}"
         f"✅ <b>Стало:</b> {new_text}\n\n"
         f"🕐 {now}\n"
         f"🔗 <a href='{START_URL}'>Открыть сайт</a>"
     )
 
 # ── Main ──────────────────────────────────────────────────────────────────────
-def main():
+async def main():
     watchlist = json.loads(WATCHLIST_JSON)
     if not watchlist:
         log.warning("WATCHLIST_JSON is empty")
@@ -288,30 +217,58 @@ def main():
     state = load_state()
     log.info(f"Loaded state with {len(state)} entries. Checking {len(watchlist)} targets...")
 
-    for target in watchlist:
-        key = state_key(target)
-        log.info(f"Checking: {target['province_name']} / {target['office_name']} / {target['tramite']}")
-
+    async with async_playwright() as p:
+        # Try system Chrome first (bypasses FortiGate), fall back to Chromium
         try:
-            new_text = scrape_lot(target)
+            browser = await p.chromium.launch(
+                channel="chrome",   # uses /Applications/Google Chrome.app
+                headless=True,
+                args=["--no-sandbox", "--disable-blink-features=AutomationControlled"]
+            )
+            log.info("Using system Chrome")
         except Exception as e:
-            log.error(f"  Unexpected error: {e}")
-            new_text = None
+            log.warning(f"System Chrome not found ({e}), falling back to Chromium")
+            browser = await p.chromium.launch(
+                headless=True,
+                args=["--no-sandbox", "--disable-blink-features=AutomationControlled"]
+            )
 
-        if new_text is None:
-            log.warning(f"  Skipping {key}")
-            continue
+        context = await browser.new_context(
+            user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                       "AppleWebKit/537.36 (KHTML, like Gecko) "
+                       "Chrome/124.0.0.0 Safari/537.36",
+            locale="es-ES",
+            viewport={"width": 1280, "height": 800},
+        )
+        # Hide webdriver flag
+        await context.add_init_script(
+            "Object.defineProperty(navigator,'webdriver',{get:()=>undefined})"
+        )
 
-        old_text = state.get(key)
-        if new_text != old_text:
-            log.info(f"  CHANGE: {old_text!r} → {new_text!r}")
-            send_telegram(build_notification(target, old_text, new_text))
-            state[key] = new_text
-            save_state(state)
-        else:
-            log.info(f"  No change")
+        for target in watchlist:
+            key  = state_key(target)
+            page = await context.new_page()
+            try:
+                new_text = await scrape_lot(page, target)
+            finally:
+                await page.close()
+
+            if new_text is None:
+                log.warning(f"  Skipping {key}")
+                continue
+
+            old_text = state.get(key)
+            if new_text != old_text:
+                log.info(f"  CHANGE: {old_text!r} → {new_text!r}")
+                send_telegram(build_notification(target, old_text, new_text))
+                state[key] = new_text
+                save_state(state)
+            else:
+                log.info(f"  No change")
+
+        await browser.close()
 
     log.info("Done.")
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
