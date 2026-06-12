@@ -97,7 +97,7 @@ async def scrape_lot(page, target: dict) -> str | None:
         await page.select_option("select#form", value=province_value)
         await page.wait_for_timeout(300)
 
-        # ── Step 3: Click Aceptar ─────────────────────────────────────────────
+        # ── Step 3: Click Aceptar (province) → goes to selectSede ──────────────
         await page.click("#btnAceptar")
         await page.wait_for_load_state("networkidle", timeout=30000)
         await page.wait_for_selector("select#sede", timeout=20000)
@@ -118,37 +118,38 @@ async def scrape_lot(page, target: dict) -> str | None:
 
         log.info(f"  Office: {office_value}")
         await page.select_option("select#sede", value=office_value)
-        await page.wait_for_timeout(300)
+        await page.wait_for_timeout(500)
 
-        # ── Step 5: Click Aceptar ─────────────────────────────────────────────
-        await page.click("#btnAceptar")
-        await page.wait_for_load_state("networkidle", timeout=30000)
-        await page.wait_for_timeout(1000)
-
-        # ── Step 6: Select tramite ────────────────────────────────────────────
-        radios = await page.query_selector_all("input[type=radio]")
-        tramite_found = False
-        for radio in radios:
-            rid   = await radio.get_attribute("id") or ""
-            label = await page.query_selector(f"label[for='{rid}']")
-            label_text = (await label.inner_text()).upper() if label else ""
-            val   = (await radio.get_attribute("value") or "").upper()
-            if tramite_kw in label_text or tramite_kw in val:
-                await radio.click()
-                log.info(f"  Tramite: {label_text or val}")
-                tramite_found = True
-                break
-
-        if not tramite_found:
-            radios_dbg = []
-            for r in radios:
-                rid = await r.get_attribute("id") or ""
-                lbl = await page.query_selector(f"label[for='{rid}']")
-                radios_dbg.append((await lbl.inner_text()).strip() if lbl else await r.get_attribute("value"))
-            log.error(f"  Tramite '{tramite_kw}' not found. Available: {radios_dbg}")
+        # ── Step 5: Select tramite from select#tramiteGrupo[0] ────────────────
+        # Tramite select appears on same page after office selection (no page reload)
+        tramite_sel = await page.query_selector("select[id^='tramiteGrupo']")
+        if not tramite_sel:
+            log.error("  Tramite select not found")
+            log.error(f"  Page: {(await page.inner_text('body'))[:300]}")
             return None
 
-        await page.wait_for_timeout(300)
+        tramite_opts = await tramite_sel.query_selector_all("option")
+        tramite_value = None
+        tramite_label = None
+        for opt in tramite_opts:
+            val  = await opt.get_attribute("value") or ""
+            text = (await opt.inner_text()).strip().upper()
+            if tramite_kw in text:
+                tramite_value = val
+                tramite_label = text
+                break
+
+        if not tramite_value:
+            opts_dbg = [(await o.get_attribute("value"), (await o.inner_text()).strip()) for o in tramite_opts]
+            log.error(f"  Tramite '{tramite_kw}' not found. Available: {opts_dbg}")
+            return None
+
+        log.info(f"  Tramite: {tramite_label} (value={tramite_value})")
+        tramite_sel_id = await tramite_sel.get_attribute("id")
+        await page.select_option(f"#{tramite_sel_id}", value=tramite_value)
+        await page.wait_for_timeout(500)
+
+        # ── Step 6: Click Aceptar → result page ──────────────────────────────
         await page.click("#btnAceptar")
         await page.wait_for_load_state("networkidle", timeout=30000)
         await page.wait_for_timeout(1000)
