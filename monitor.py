@@ -165,6 +165,23 @@ async def scrape_lot(page, target: dict) -> str | None:
         return None
 
 
+def parse_lot(text: str) -> str:
+    """Extract the lot number from result text.
+    '... ES EL 37'       → '37'
+    '... ES EL 2026/093' → '093'
+    Falls back to full text if no number found.
+    """
+    # Try slash format: 2026/093 → take part after slash
+    m = re.search(r'\d{4}/(\d+)\s*$', text.strip())
+    if m:
+        return m.group(1).lstrip('0') or '0'
+    # Plain number at end of string
+    m = re.search(r'(\d+)\s*$', text.strip())
+    if m:
+        return m.group(1).lstrip('0') or '0'
+    return text
+
+
 async def extract_result(page) -> str:
     for sel in ["#citaNoDisponible", ".mf-msg__info", ".mf-msg__exito",
                 ".mf-msg__error", "#mensajeInfo", "#msgError", "#inicio"]:
@@ -172,14 +189,15 @@ async def extract_result(page) -> str:
         if el:
             text = (await el.inner_text()).strip()
             if text and len(text) > 5:
-                return text
+                return parse_lot(text)
 
     body = await page.inner_text("body")
     keywords = ["lote", "expediente", "cita", "disponible", "no hay", "turno"]
     lines = [l.strip() for l in body.split("\n")
              if any(k in l.lower() for k in keywords) and l.strip()]
     if lines:
-        return " | ".join(lines[:3])
+        full = " | ".join(lines[:3])
+        return parse_lot(full)
 
     chunks = body.split()
     return " ".join(chunks[:20]) if chunks else "No text"
@@ -189,14 +207,16 @@ def build_notification(target: dict, old_text: str | None, new_text: str) -> str
     now      = datetime.now().strftime("%d.%m.%Y %H:%M")
     expected = target.get("expected_lot", "").strip()
     highlight = ""
-    if expected:
-        if expected.lower() in new_text.lower():
-            highlight = "🎯 <b>ВАШ ЛОТ НАЙДЕН!</b>\n"
-        else:
-            for n in re.findall(r'\d+', new_text):
-                if expected.isdigit() and int(n) >= int(expected):
-                    highlight = f"⚡️ <b>Лот {n} ≥ ожидаемого ({expected})!</b>\n"
-                    break
+    if expected and expected.isdigit():
+        try:
+            current = int(new_text.strip())
+            exp_int = int(expected)
+            if current == exp_int:
+                highlight = f"🎯 <b>ВАШ ЛОТ {current}!</b>\n"
+            elif current > exp_int:
+                highlight = f"⚡️ <b>Лот {current} уже прошёл ваш ({expected})!</b>\n"
+        except ValueError:
+            pass
     change = f"📌 <i>Было:</i> {old_text}\n" if old_text else ""
     return (
         f"{highlight}"
