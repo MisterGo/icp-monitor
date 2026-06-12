@@ -1,10 +1,8 @@
 name: ICP Monitor
 
 on:
-  # Run every 30 minutes
   schedule:
-    - cron: "*/30 * * * *"
-  # Allow manual trigger from GitHub UI
+    - cron: "*/15 * * * *"
   workflow_dispatch:
 
 jobs:
@@ -18,8 +16,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip3 install playwright playwright-stealth --break-system-packages --quiet
-          playwright install chromium
+          pip3 install curl-cffi beautifulsoup4 python-telegram-bot --break-system-packages --quiet
 
       - name: Run monitor
         env:
