@@ -89,20 +89,60 @@ async def scrape_lot(page, target: dict) -> str | None:
         await page.goto(ICP_URL, wait_until="domcontentloaded", timeout=30000)
         await page.wait_for_selector("select#form", timeout=15000)
 
-        # Step 2: Select province
-        await page.select_option("select#form", value=target["province"])
+        # Step 2: Select province by matching p=CODE in the option value URL
+        province_code = target["province"]
+        province_name = target["province_name"]
+        options = await page.query_selector_all("select#form option")
+        province_value = None
+        for opt in options:
+            val = await opt.get_attribute("value") or ""
+            text = (await opt.inner_text()).strip()
+            if f"p={province_code}&" in val or f"p={province_code}" in val:
+                province_value = val
+                break
+            if province_name.lower() in text.lower():
+                province_value = val
+                break
+        if not province_value:
+            log.error(f"  Province '{province_name}' (code {province_code}) not found")
+            opts_debug = [(await o.get_attribute("value"), (await o.inner_text()).strip()) for o in options]
+            log.error(f"  Available: {opts_debug}")
+            return None
+        log.info(f"  Province value: {province_value}")
+        await page.select_option("select#form", value=province_value)
         await page.wait_for_timeout(500)
 
-        # Step 3: Click "Aceptar" (first submit button)
-        await page.click("input[type=submit][value='Aceptar']")
+        # Step 3: Click Aceptar — it's type=button with id=btnAceptar, not type=submit
+        await page.click("#btnAceptar")
+        await page.wait_for_load_state("domcontentloaded", timeout=15000)
+        await page.wait_for_timeout(2000)
+
+        # Step 4: Select office by matching office_name text or office code in value
         await page.wait_for_selector("select#sede", timeout=15000)
-
-        # Step 4: Select office
-        await page.select_option("select#sede", value=target["office"])
+        office_name = target["office_name"]
+        office_code = str(target["office"])
+        sede_options = await page.query_selector_all("select#sede option")
+        office_value = None
+        for opt in sede_options:
+            val = await opt.get_attribute("value") or ""
+            text = (await opt.inner_text()).strip()
+            if office_code and office_code in val:
+                office_value = val
+                break
+            if office_name.lower() in text.lower():
+                office_value = val
+                break
+        if not office_value:
+            log.error(f"  Office '{office_name}' not found")
+            opts_debug = [(await o.get_attribute("value"), (await o.inner_text()).strip()) for o in sede_options]
+            log.error(f"  Available offices: {opts_debug}")
+            return None
+        log.info(f"  Office value: {office_value}")
+        await page.select_option("select#sede", value=office_value)
         await page.wait_for_timeout(500)
 
-        # Step 5: Click "Aceptar" again
-        await page.click("input[type=submit][value='Aceptar']")
+        # Step 5: Click Aceptar again
+        await page.click("#btnAceptar")
         await page.wait_for_load_state("domcontentloaded", timeout=15000)
         await page.wait_for_timeout(1000)
 
