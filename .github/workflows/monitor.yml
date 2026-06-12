@@ -15,8 +15,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install dependencies
-        run: |
-          pip3 install curl-cffi beautifulsoup4 python-telegram-bot --break-system-packages --quiet
+        run: pip3 install playwright --break-system-packages --quiet
 
       - name: Run monitor
         env:
