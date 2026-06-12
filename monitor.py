@@ -145,8 +145,8 @@ async def scrape_lot(page, target: dict) -> str | None:
             return None
 
         log.info(f"  Tramite: {tramite_label} (value={tramite_value})")
-        tramite_sel_id = await tramite_sel.get_attribute("id")
-        await page.select_option(f"#{tramite_sel_id}", value=tramite_value)
+        # Use element handle directly — id contains [0] which breaks CSS selectors
+        await tramite_sel.select_option(value=tramite_value)
         await page.wait_for_timeout(800)
 
         # ── Step 6: Click Aceptar → result page ──────────────────────────────
