@@ -12,7 +12,8 @@ import logging
 from datetime import datetime
 from pathlib import Path
 from playwright.async_api import async_playwright
-from playwright_stealth import stealth_async
+from playwright_stealth import Stealth
+_stealth = Stealth(navigator_languages_override=('es-ES', 'es'), navigator_platform_override='MacIntel')
 
 # ── Logging ──────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -341,7 +342,7 @@ async def main():
         for target in watchlist:
             key = state_key(target)
             page = await context.new_page()
-            await stealth_async(page)
+            await _stealth.apply_stealth_async(page)
             
             try:
                 new_text = await scrape_lot(page, target)
