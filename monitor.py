@@ -235,25 +235,25 @@ async def main():
                 args=["--no-sandbox", "--disable-blink-features=AutomationControlled"]
             )
 
-        context = await browser.new_context(
-            user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                       "AppleWebKit/537.36 (KHTML, like Gecko) "
-                       "Chrome/124.0.0.0 Safari/537.36",
-            locale="es-ES",
-            viewport={"width": 1280, "height": 800},
-        )
-        # Hide webdriver flag
-        await context.add_init_script(
-            "Object.defineProperty(navigator,'webdriver',{get:()=>undefined})"
-        )
-
         for target in watchlist:
-            key  = state_key(target)
-            page = await context.new_page()
+            key = state_key(target)
+            # Fresh context per target — avoids session/cookie bleed between runs
+            ctx = await browser.new_context(
+                user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                           "AppleWebKit/537.36 (KHTML, like Gecko) "
+                           "Chrome/124.0.0.0 Safari/537.36",
+                locale="es-ES",
+                viewport={"width": 1280, "height": 800},
+            )
+            await ctx.add_init_script(
+                "Object.defineProperty(navigator,'webdriver',{get:()=>undefined})"
+            )
+            page = await ctx.new_page()
             try:
                 new_text = await scrape_lot(page, target)
             finally:
                 await page.close()
+                await ctx.close()
 
             if new_text is None:
                 log.warning(f"  Skipping {key}")
