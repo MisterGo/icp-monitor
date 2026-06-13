@@ -41,16 +41,17 @@ def save_state(state: dict):
     STATE_FILE.write_text(json.dumps(state, ensure_ascii=False, indent=2))
 
 def state_key(t: dict) -> str:
-    return f"{t['province']}_{t.get('office', '')}_{t['tramite']}"
+    return f"{t['province']}_{t.get('office_name', t.get('office', ''))}_{t['tramite']}"
 
 # ── Telegram ──────────────────────────────────────────────────────────────────
 def send_telegram(message: str):
     import urllib.request
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    # Remove parse_mode for safety — use plain text to avoid HTML errors
     payload = json.dumps({
         "chat_id": TELEGRAM_CHAT_ID,
         "text": message,
-        "parse_mode": "HTML"
+        "disable_web_page_preview": True,
     }).encode()
     req = urllib.request.Request(
         url, data=payload,
@@ -212,24 +213,60 @@ def build_notification(target: dict, old_text: str | None, new_text: str) -> str
             current = int(new_text.strip())
             exp_int = int(expected)
             if current == exp_int:
-                highlight = f"🎯 <b>ВАШ ЛОТ {current}!</b>\n"
+                highlight = f"🎯 ВАШ ЛОТ {current}!\n"
             elif current > exp_int:
-                highlight = f"⚡️ <b>Лот {current} уже прошёл ваш ({expected})!</b>\n"
+                highlight = f"⚡️ Лот {current} уже прошёл ваш ({expected})!\n"
         except ValueError:
             pass
-    change = f"📌 <i>Было:</i> {old_text}\n" if old_text else ""
+    change = f"📌 Было: {old_text}\n" if old_text else ""
     return (
         f"{highlight}"
-        f"🔔 <b>Изменение на ICP!</b>\n"
+        f"🔔 Изменение на ICP!\n"
         f"📍 {target['province_name']} → {target['office_name']}\n"
         f"📋 {target['tramite']}\n\n"
         f"{change}"
-        f"✅ <b>Стало:</b> {new_text}\n\n"
+        f"✅ Стало: {new_text}\n\n"
         f"🕐 {now}\n"
-        f"🔗 <a href='{START_URL}'>Открыть сайт</a>"
+        f"🔗 {START_URL}"
     )
 
-# ── Main ──────────────────────────────────────────────────────────────────────
+# ── Fresh browser per target ─────────────────────────────────────────────────
+async def scrape_with_fresh_browser(p, target: dict) -> str | None:
+    """Launch a brand-new browser for each target to avoid F5 fingerprint bans."""
+    try:
+        browser = await p.chromium.launch(
+            channel="chrome",
+            headless=True,
+            args=["--no-sandbox", "--disable-blink-features=AutomationControlled"]
+        )
+        log.info("Using system Chrome")
+    except Exception as e:
+        log.warning(f"System Chrome not found ({e}), falling back to Chromium")
+        browser = await p.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-blink-features=AutomationControlled"]
+        )
+    try:
+        ctx = await browser.new_context(
+            user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                       "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            locale="es-ES",
+            viewport={"width": 1280, "height": 800},
+        )
+        await ctx.add_init_script(
+            "Object.defineProperty(navigator,'webdriver',{get:()=>undefined})"
+        )
+        page = await ctx.new_page()
+        try:
+            return await scrape_lot(page, target)
+        finally:
+            await page.close()
+            await ctx.close()
+    finally:
+        await browser.close()
+
+
+# ── Main ──────────────────────────────────────────────────────────────────────────
 async def main():
     watchlist = json.loads(WATCHLIST_JSON)
     if not watchlist:
@@ -257,23 +294,7 @@ async def main():
 
         for target in watchlist:
             key = state_key(target)
-            # Fresh context per target — avoids session/cookie bleed between runs
-            ctx = await browser.new_context(
-                user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                           "AppleWebKit/537.36 (KHTML, like Gecko) "
-                           "Chrome/124.0.0.0 Safari/537.36",
-                locale="es-ES",
-                viewport={"width": 1280, "height": 800},
-            )
-            await ctx.add_init_script(
-                "Object.defineProperty(navigator,'webdriver',{get:()=>undefined})"
-            )
-            page = await ctx.new_page()
-            try:
-                new_text = await scrape_lot(page, target)
-            finally:
-                await page.close()
-                await ctx.close()
+            new_text = await scrape_with_fresh_browser(p, target)
 
             if new_text is None:
                 log.warning(f"  Skipping {key}")
@@ -287,8 +308,6 @@ async def main():
                 save_state(state)
             else:
                 log.info(f"  No change")
-
-        await browser.close()
 
     log.info("Done.")
 
